@@ -1,0 +1,34 @@
+pkgbase = libfprint-realtek-9011
+	pkgdesc = Library for fingerprint readers (with Realtek 3274:9011 Match-on-Chip support)
+	pkgver = 1.94.100
+	pkgrel = 2
+	url = https://fprint.freedesktop.org/
+	arch = x86_64
+	groups = fprint
+	license = LGPL-2.1-or-later
+	checkdepends = cairo
+	checkdepends = umockdev
+	makedepends = git
+	makedepends = glib2-devel
+	makedepends = gobject-introspection
+	makedepends = gtk-doc
+	makedepends = meson
+	makedepends = python-cairo
+	makedepends = python-gobject
+	makedepends = systemd
+	depends = glib2
+	depends = glibc
+	depends = libgcc
+	depends = libgudev
+	depends = libgusb
+	depends = openssl
+	depends = pixman
+	provides = libfprint
+	provides = libfprint-2.so
+	conflicts = libfprint
+	source = git+https://gitlab.freedesktop.org/libfprint/libfprint.git#commit=6f9479c3d55f847c1b3769f28ceb99227f9858cf
+	source = 0001-realtek-add-3274-9011-support.patch
+	sha256sums = SKIP
+	sha256sums = 94b0039e2af42693586f1824f47a369ac91c55e002172c6442d7b1877d5d1fcf
+
+pkgname = libfprint-realtek-9011

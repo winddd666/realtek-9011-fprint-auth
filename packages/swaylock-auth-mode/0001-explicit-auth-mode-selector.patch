@@ -1,0 +1,279 @@
+From 48bc2ce641152611f56cac8d045b6b6f2d837695 Mon Sep 17 00:00:00 2001
+From: xzq <xiazq123666@gmail.com>
+Date: Wed, 11 Nov 2026 23:22:54 -0800
+Subject: [PATCH] Add explicit fingerprint/password authentication mode
+ selector
+
+---
+ README.md          |  7 ++++++
+ include/swaylock.h |  7 ++++++
+ main.c             |  3 +++
+ password.c         | 59 ++++++++++++++++++++++++++++++++++++++--------
+ render.c           | 21 ++++++++++++-----
+ swaylock.1.scd     | 16 +++++++++++++
+ 6 files changed, 97 insertions(+), 16 deletions(-)
+
+diff --git a/README.md b/README.md
+index 5be1e74..67d4c97 100644
+--- a/README.md
++++ b/README.md
+@@ -6,6 +6,13 @@ protocol.
+ 
+ See the man page, [swaylock(1)](swaylock.1.scd), for instructions on using swaylock.
+ 
++This local branch adds an explicit lock-screen authentication mode. The
++indicator starts in `Fingerprint`; Tab toggles to `Password`, and direct text
++input selects `Password` automatically. Fingerprint submission uses the `:fp`
++PAM selector token internally, so the password buffer never treats it as a
++fallback credential. The indicator hides after five seconds without keyboard
++activity and reappears on the next key press or mode change.
++
+ ## Release Signatures
+ 
+ Releases are signed with [E88F5E48](https://keys.openpgp.org/search?q=34FF9526CFEF0E97A340E2E40FDE7BE0E88F5E48)
+diff --git a/include/swaylock.h b/include/swaylock.h
+index 0d5f3ae..1d0f58d 100644
+--- a/include/swaylock.h
++++ b/include/swaylock.h
+@@ -15,6 +15,11 @@ enum auth_state {
+ 	AUTH_STATE_INVALID, // displaying message: password was wrong
+ };
+ 
++enum auth_mode {
++	AUTH_MODE_FINGERPRINT,
++	AUTH_MODE_PASSWORD,
++};
++
+ // Indicator state: status of password buffer / typing letters
+ enum input_state {
+ 	INPUT_STATE_IDLE, // nothing happening; other states decay to this after time
+@@ -94,6 +99,7 @@ struct swaylock_state {
+ 	cairo_surface_t *test_surface;
+ 	cairo_t *test_cairo; // used to estimate font/text sizes
+ 	enum auth_state auth_state; // state of the authentication attempt
++	enum auth_mode auth_mode; // credential selected on the lock screen
+ 	enum input_state input_state; // state of the password buffer and key inputs
+ 	uint32_t highlight_start; // position of highlight; 2048 = 1 full turn
+ 	int failed_attempts;
+@@ -138,6 +144,7 @@ void swaylock_handle_key(struct swaylock_state *state,
+ void render(struct swaylock_surface *surface);
+ void damage_state(struct swaylock_state *state);
+ void clear_password_buffer(struct swaylock_password *pw);
++void schedule_input_idle(struct swaylock_state *state);
+ void schedule_auth_idle(struct swaylock_state *state);
+ 
+ void initialize_pw_backend(int argc, char **argv);
+diff --git a/main.c b/main.c
+index e1c4f62..2c47097 100644
+--- a/main.c
++++ b/main.c
+@@ -1100,6 +1100,8 @@ int main(int argc, char **argv) {
+ 
+ 	enum line_mode line_mode = LM_LINE;
+ 	state.failed_attempts = 0;
++	state.auth_mode = AUTH_MODE_FINGERPRINT;
++	state.input_state = INPUT_STATE_NEUTRAL;
+ 	state.args = (struct swaylock_args){
+ 		.mode = BACKGROUND_MODE_FILL,
+ 		.font = strdup("sans-serif"),
+@@ -1186,6 +1188,7 @@ int main(int argc, char **argv) {
+ 		return EXIT_FAILURE;
+ 	}
+ 	state.eventloop = loop_create();
++	schedule_input_idle(&state);
+ 
+ 	struct wl_registry *registry = wl_display_get_registry(state.display);
+ 	wl_registry_add_listener(registry, &registry_listener, &state);
+diff --git a/password.c b/password.c
+index 00eeaa5..8d14dae 100644
+--- a/password.c
++++ b/password.c
+@@ -12,6 +12,9 @@
+ #include "swaylock.h"
+ #include "unicode.h"
+ 
++#define FINGERPRINT_MARKER ":fp"
++#define INDICATOR_IDLE_TIMEOUT_MS 5000
++
+ void clear_buffer(char *buf, size_t size) {
+ 	// Use volatile keyword so so compiler can't optimize this out.
+ 	volatile char *buffer = buf;
+@@ -60,12 +63,12 @@ static void set_auth_idle(void *data) {
+ 	damage_state(state);
+ }
+ 
+-static void schedule_input_idle(struct swaylock_state *state) {
++void schedule_input_idle(struct swaylock_state *state) {
+ 	if (state->input_idle_timer) {
+ 		loop_remove_timer(state->eventloop, state->input_idle_timer);
+ 	}
+ 	state->input_idle_timer = loop_add_timer(
+-		state->eventloop, 1500, set_input_idle, state);
++		state->eventloop, INDICATOR_IDLE_TIMEOUT_MS, set_input_idle, state);
+ }
+ 
+ static void cancel_input_idle(struct swaylock_state *state) {
+@@ -107,7 +110,31 @@ static void cancel_password_clear(struct swaylock_state *state) {
+ 	}
+ }
+ 
+-static void submit_password(struct swaylock_state *state) {
++static void set_auth_mode(struct swaylock_state *state, enum auth_mode mode) {
++	if (state->auth_state == AUTH_STATE_VALIDATING || state->auth_mode == mode) {
++		return;
++	}
++
++	clear_password_buffer(&state->password);
++	state->auth_mode = mode;
++	state->input_state = INPUT_STATE_NEUTRAL;
++	cancel_password_clear(state);
++	cancel_input_idle(state);
++	schedule_input_idle(state);
++	swaylock_log(LOG_DEBUG, "Authentication mode: %s",
++		mode == AUTH_MODE_FINGERPRINT ? "fingerprint" : "password");
++	damage_state(state);
++}
++
++static void submit_auth(struct swaylock_state *state) {
++	if (state->auth_mode == AUTH_MODE_FINGERPRINT) {
++		swaylock_log(LOG_DEBUG, "Submitting fingerprint authentication");
++		clear_password_buffer(&state->password);
++		memcpy(state->password.buffer, FINGERPRINT_MARKER,
++			sizeof(FINGERPRINT_MARKER));
++		state->password.len = sizeof(FINGERPRINT_MARKER) - 1;
++	}
++
+ 	if (state->args.ignore_empty && state->password.len == 0) {
+ 		return;
+ 	}
+@@ -141,7 +168,14 @@ void swaylock_handle_key(struct swaylock_state *state,
+ 	case XKB_KEY_KP_Enter: /* fallthrough */
+ 	case XKB_KEY_Return:
+ 		if (!repeat) {
+-			submit_password(state);
++			submit_auth(state);
++		}
++		break;
++	case XKB_KEY_Tab: /* fallthrough */
++	case XKB_KEY_ISO_Left_Tab:
++		if (!repeat) {
++			set_auth_mode(state, state->auth_mode == AUTH_MODE_FINGERPRINT ?
++				AUTH_MODE_PASSWORD : AUTH_MODE_FINGERPRINT);
+ 		}
+ 		break;
+ 	case XKB_KEY_Delete:
+@@ -164,11 +198,15 @@ void swaylock_handle_key(struct swaylock_state *state,
+ 		damage_state(state);
+ 		break;
+ 	case XKB_KEY_Escape:
+-		clear_password_buffer(&state->password);
+-		state->input_state = INPUT_STATE_CLEAR;
+-		cancel_password_clear(state);
+-		schedule_input_idle(state);
+-		damage_state(state);
++		if (state->auth_mode == AUTH_MODE_PASSWORD) {
++			set_auth_mode(state, AUTH_MODE_FINGERPRINT);
++		} else {
++			clear_password_buffer(&state->password);
++			state->input_state = INPUT_STATE_CLEAR;
++			cancel_password_clear(state);
++			schedule_input_idle(state);
++			damage_state(state);
++		}
+ 		break;
+ 	case XKB_KEY_Caps_Lock:
+ 	case XKB_KEY_Shift_L:
+@@ -191,7 +229,7 @@ void swaylock_handle_key(struct swaylock_state *state,
+ 	case XKB_KEY_j:
+ 		if (state->xkb.control) {
+ 			if (!repeat) {
+-				submit_password(state);
++				submit_auth(state);
+ 			}
+ 			break;
+ 		}
+@@ -209,6 +247,7 @@ void swaylock_handle_key(struct swaylock_state *state,
+ 		// fallthrough
+ 	default:
+ 		if (codepoint) {
++			set_auth_mode(state, AUTH_MODE_PASSWORD);
+ 			append_ch(&state->password, codepoint);
+ 			state->input_state = INPUT_STATE_LETTER;
+ 			schedule_password_clear(state);
+diff --git a/render.c b/render.c
+index 9d67241..1e902da 100644
+--- a/render.c
++++ b/render.c
+@@ -18,6 +18,8 @@ static void set_color_for_state(cairo_t *cairo, struct swaylock_state *state,
+ 		cairo_set_source_u32(cairo, colorset->verifying);
+ 	} else if (state->auth_state == AUTH_STATE_INVALID) {
+ 		cairo_set_source_u32(cairo, colorset->wrong);
++	} else if (state->auth_mode == AUTH_MODE_FINGERPRINT) {
++		cairo_set_source_u32(cairo, colorset->cleared);
+ 	} else {
+ 		if (state->xkb.caps_lock && state->args.show_caps_lock_indicator) {
+ 			cairo_set_source_u32(cairo, colorset->caps_lock);
+@@ -147,13 +149,15 @@ static bool render_frame(struct swaylock_surface *surface) {
+ 			state->args.indicator_idle_visible);
+ 
+ 	if (draw_indicator) {
+-		if (state->input_state == INPUT_STATE_CLEAR) {
+-			// This message has highest priority
+-			text = "Cleared";
+-		} else if (state->auth_state == AUTH_STATE_VALIDATING) {
+-			text = "Verifying";
++		if (state->auth_state == AUTH_STATE_VALIDATING) {
++			text = state->auth_mode == AUTH_MODE_FINGERPRINT ?
++				"Scanning" : "Verifying";
+ 		} else if (state->auth_state == AUTH_STATE_INVALID) {
+-			text = "Wrong";
++			text = state->auth_mode == AUTH_MODE_FINGERPRINT ?
++				"Not recognized" : "Wrong";
++		} else if (state->input_state == INPUT_STATE_CLEAR &&
++				state->auth_mode == AUTH_MODE_PASSWORD) {
++			text = "Cleared";
+ 		} else {
+ 			// Caps Lock has higher priority
+ 			if (state->xkb.caps_lock && state->args.show_caps_lock_text) {
+@@ -184,6 +188,11 @@ static bool render_frame(struct swaylock_surface *surface) {
+ 					layout_text = xkb_keymap_layout_get_name(state->xkb.keymap, curr_layout);
+ 				}
+ 			}
++
++			if (!text) {
++				text = state->auth_mode == AUTH_MODE_FINGERPRINT ?
++					"Fingerprint" : "Password";
++			}
+ 		}
+ 	}
+ 
+diff --git a/swaylock.1.scd b/swaylock.1.scd
+index ec359c4..61ab079 100644
+--- a/swaylock.1.scd
++++ b/swaylock.1.scd
+@@ -10,6 +10,22 @@ _swaylock_ [options...]
+ 
+ Locks your Wayland session.
+ 
++# AUTHENTICATION MODES
++
++This build starts with *Fingerprint* selected in the unlock indicator. Press
++Enter to submit fingerprint authentication through PAM. Press Tab or Shift+Tab
++to switch between *Fingerprint* and *Password*. Switching modes clears any
++buffered password.
++
++Typing a printable character while *Fingerprint* is selected switches to
++*Password* automatically and keeps the character. Escape clears the password
++and returns to *Fingerprint*. The indicator uses the configured clear colors
++for *Fingerprint* and the normal input colors for *Password*.
++
++The indicator is shown for five seconds after locking or keyboard activity,
++then hidden while authentication is idle. Mode changes restart this timer.
++Validation and failure states remain visible until they complete.
++
+ # OPTIONS
+ 
+ *-C, --config* <path>
+-- 
+2.56.0
+

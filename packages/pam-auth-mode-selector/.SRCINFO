@@ -1,0 +1,17 @@
+pkgbase = pam-auth-mode-selector
+	pkgdesc = Explicit password/fingerprint mode selector module for PAM stacks
+	pkgver = 1.0.0
+	pkgrel = 1
+	url = https://github.com/winddd666/realtek-9011-fprint-auth
+	arch = x86_64
+	license = MIT
+	depends = glibc
+	depends = pam
+	source = pam_auth_mode_selector.c
+	source = pam-auth-test.c
+	source = LICENSE
+	sha256sums = e2f72e8ccbb78995a26bc781d525910109526512ac2ecaa0f18c186e18cae663
+	sha256sums = 4ab23eb4c9c4ad3c49ef71d60f4fca9941296d535cdd14ed48fc4062bbab4a5d
+	sha256sums = ef0a4535a5ed98ec8f808b703d3723bb30c31b79cecbb30b852e4dacc6ee1ba8
+
+pkgname = pam-auth-mode-selector

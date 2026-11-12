@@ -1,0 +1,61 @@
+# Maintainer: xzq <xiazq123666@gmail.com>
+
+pkgname=swaylock-auth-mode
+_pkgname=swaylock
+pkgver=1.8.6.r3.g701a352
+pkgrel=1
+pkgdesc="Screen locker for Wayland with explicit fingerprint/password mode switching"
+arch=(x86_64)
+url="https://github.com/swaywm/swaylock"
+license=(MIT)
+depends=(
+  cairo
+  gdk-pixbuf2
+  glibc
+  libxkbcommon
+  pam
+  wayland
+)
+makedepends=(
+  git
+  meson
+  ninja
+  scdoc
+  wayland-protocols
+)
+provides=(swaylock)
+conflicts=(swaylock)
+backup=(etc/pam.d/swaylock)
+_commit=701a352e7eb03f5daf4252ea0a0f7aa437819b71
+source=(
+  "git+https://github.com/swaywm/swaylock.git#commit=${_commit}"
+  "0001-explicit-auth-mode-selector.patch"
+)
+sha256sums=(
+  'SKIP'
+  'c44d9e42a60e5d193503909e95f1b009b619720ee6f95dd4f31e83937d18a128'
+)
+
+prepare() {
+  cd "$_pkgname"
+  patch -Np1 -i "$srcdir/0001-explicit-auth-mode-selector.patch"
+}
+
+build() {
+  arch-meson "$_pkgname" build -Dman-pages=enabled
+  meson compile -C build
+}
+
+check() {
+  ./build/swaylock --version | grep -q "1.8.6"
+  strings ./build/swaylock | grep -qx 'Fingerprint'
+  strings ./build/swaylock | grep -qx 'Password'
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+  install -Dm644 "$_pkgname/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+# vim:set sw=2 sts=-1 et:

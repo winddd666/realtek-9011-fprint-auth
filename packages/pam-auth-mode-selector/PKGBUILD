@@ -1,0 +1,47 @@
+# Maintainer: xzq <xiazq123666@gmail.com>
+
+pkgname=pam-auth-mode-selector
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Explicit password/fingerprint mode selector module for PAM stacks"
+url="https://github.com/winddd666/realtek-9011-fprint-auth"
+arch=(x86_64)
+license=(MIT)
+depends=(
+  glibc
+  pam
+)
+source=(
+  "pam_auth_mode_selector.c"
+  "pam-auth-test.c"
+  "LICENSE"
+)
+sha256sums=(
+  'e2f72e8ccbb78995a26bc781d525910109526512ac2ecaa0f18c186e18cae663'
+  '4ab23eb4c9c4ad3c49ef71d60f4fca9941296d535cdd14ed48fc4062bbab4a5d'
+  'ef0a4535a5ed98ec8f808b703d3723bb30c31b79cecbb30b852e4dacc6ee1ba8'
+)
+
+build() {
+  cc $CPPFLAGS $CFLAGS -std=gnu11 -fPIC -Wall -Wextra -Werror \
+    -shared -Wl,-z,relro,-z,now $LDFLAGS \
+    "$srcdir/pam_auth_mode_selector.c" -o pam_auth_mode_selector.so -lpam
+
+  cc $CPPFLAGS $CFLAGS -std=gnu11 -Wall -Wextra -Werror \
+    $LDFLAGS "$srcdir/pam-auth-test.c" -o pam-auth-test -lpam
+}
+
+check() {
+  nm -D pam_auth_mode_selector.so | grep -q ' T pam_sm_authenticate$'
+  nm -D pam_auth_mode_selector.so | grep -q ' T pam_sm_setcred$'
+  test -x pam-auth-test
+}
+
+package() {
+  install -Dm755 pam_auth_mode_selector.so \
+    "$pkgdir/usr/lib/security/pam_auth_mode_selector.so"
+  install -Dm644 "$srcdir/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+# vim:set sw=2 sts=-1 et:

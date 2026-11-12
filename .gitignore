@@ -1,0 +1,15 @@
+# Arch Linux makepkg build artifacts
+**/pkg/
+**/src/
+**/*.pkg.tar.*
+**/*.log
+
+# Compiled binaries and objects
+*.o
+*.so
+pam-auth-test
+
+# Editor / OS
+.DS_Store
+*~
+*.swp

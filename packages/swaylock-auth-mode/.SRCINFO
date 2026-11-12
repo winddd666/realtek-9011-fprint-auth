@@ -1,0 +1,27 @@
+pkgbase = swaylock-auth-mode
+	pkgdesc = Screen locker for Wayland with explicit fingerprint/password mode switching
+	pkgver = 1.8.6.r3.g701a352
+	pkgrel = 1
+	url = https://github.com/swaywm/swaylock
+	arch = x86_64
+	license = MIT
+	makedepends = git
+	makedepends = meson
+	makedepends = ninja
+	makedepends = scdoc
+	makedepends = wayland-protocols
+	depends = cairo
+	depends = gdk-pixbuf2
+	depends = glibc
+	depends = libxkbcommon
+	depends = pam
+	depends = wayland
+	provides = swaylock
+	conflicts = swaylock
+	backup = etc/pam.d/swaylock
+	source = git+https://github.com/swaywm/swaylock.git#commit=701a352e7eb03f5daf4252ea0a0f7aa437819b71
+	source = 0001-explicit-auth-mode-selector.patch
+	sha256sums = SKIP
+	sha256sums = c44d9e42a60e5d193503909e95f1b009b619720ee6f95dd4f31e83937d18a128
+
+pkgname = swaylock-auth-mode
