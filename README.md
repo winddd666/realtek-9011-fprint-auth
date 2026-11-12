@@ -9,7 +9,7 @@ Linux fingerprint driver and Wayland lock-screen authentication suite, originall
 This repository contains two decoupled layers that can be used **together or independently**:
 
 1. **Hardware Driver (`packages/libfprint-realtek-9011`)**  
-   Adds Match-on-Chip (MoC) support for **`3274:9011 Generic Realtek USB2.0 Finger Print Bridge`** to `libfprint` (based on upstream `master` `6f9479c`, including upstream's recent `realtek` SSM error UAF fix).
+   Adds Match-on-Chip (MoC) support for **`3274:9011 Generic Realtek USB2.0 Finger Print Bridge`** to `libfprint` (based on upstream `master` `6f9479c`, including upstream's recent `realtek` SSM error UAF fix; submitted upstream as [`libfprint!694`](https://gitlab.freedesktop.org/libfprint/libfprint/-/merge_requests/694)).
 2. **Explicit PAM & Swaylock Mode Selector (`packages/pam-auth-mode-selector`, `packages/swaylock-auth-mode`)**  
    Hardware-agnostic PAM module and `swaylock` patch that give you **mutually exclusive, instant switching between Fingerprint and Password** without 10-second PAM timeouts, accidental `pam_faillock` lockouts on wake keys, or polluting shared `system-auth` / `sudo` / `polkit-1` stacks.
 

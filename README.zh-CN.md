@@ -9,7 +9,7 @@
 本仓库的两个核心模块互相解耦，**既可成套安装，也可单独使用**：
 
 1. **硬件驱动层（`packages/libfprint-realtek-9011`）**  
-   为官方尚未支持的 **`3274:9011 Generic Realtek USB2.0 Finger Print Bridge`** 提供片上匹配（MoC）驱动（基于上游最新 `master` `6f9479c`，已包含上游近期针对 `realtek` 状态机内存释放 UAF 的修复）。所有特性均按 USB ID 隔离，不影响其他型号指纹头。
+   为官方尚未合入的 **`3274:9011 Generic Realtek USB2.0 Finger Print Bridge`** 提供片上匹配（MoC）驱动（基于上游最新 `master` `6f9479c`，已包含上游近期针对 `realtek` 状态机内存释放 UAF 的修复；已向上游提交 [`libfprint!694`](https://gitlab.freedesktop.org/libfprint/libfprint/-/merge_requests/694)）。所有特性均按 USB ID 隔离，不影响其他型号指纹头。
 2. **PAM 与锁屏模式切换层（`packages/pam-auth-mode-selector`、`packages/swaylock-auth-mode`）**  
    不绑定任何笔记本品牌或指纹型号。解决 Linux 下传统 `pam_fprintd` 配置“想直接输密码却被指纹卡 10 秒超时”、“亮屏按回车误触空密码导致 `pam_faillock` 锁死账户 10 分钟”、“改动 `system-auth` 连累 `sudo`/`polkit` 弹窗”三大痛点。
 
