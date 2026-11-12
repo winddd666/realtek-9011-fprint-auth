@@ -1,17 +1,17 @@
-From cbf19335ade0051bfa484efc68edbedaf3074992 Mon Sep 17 00:00:00 2001
-From: xzq <xiazq123666@gmail.com>
-Date: Wed, 11 Nov 2026 23:22:50 -0800
-Subject: [PATCH] realtek: Add support for 3274:9011 Match-on-Chip sensor
-
-Add USB ID 3274:9011 with device-specific quirks for template status handling, subfactor normalization (0xf7), capture parameters, 12-stage enrollment, 75 ms capture polling, press/release status semantics, and optional post-verify template updates. Also exclude 3274:9011 from USB autosuspend in udev-hwdb.
----
- libfprint/drivers/realtek/realtek.c | 196 ++++++++++++++++++++++++++--
- libfprint/drivers/realtek/realtek.h |  14 +-
- libfprint/fprint-list-udev-hwdb.c   |   2 +
- 3 files changed, 199 insertions(+), 13 deletions(-)
-
+diff --git a/data/autosuspend.hwdb b/data/autosuspend.hwdb
+index 104ce5e..b62b4ba 100644
+--- a/data/autosuspend.hwdb
++++ b/data/autosuspend.hwdb
+@@ -278,6 +278,7 @@ usb:v0BDAp5813*
+ usb:v0BDAp5816*
+ usb:v2541pFA03*
+ usb:v3274p9003*
++usb:v3274p9011*
+  ID_AUTOSUSPEND=1
+  ID_PERSIST=0
+ 
 diff --git a/libfprint/drivers/realtek/realtek.c b/libfprint/drivers/realtek/realtek.c
-index a41b0ba..39f279f 100644
+index a41b0ba..ade38d9 100644
 --- a/libfprint/drivers/realtek/realtek.c
 +++ b/libfprint/drivers/realtek/realtek.c
 @@ -31,6 +31,14 @@ static const FpIdEntry id_table[] = {
@@ -35,7 +35,7 @@ index a41b0ba..39f279f 100644
      {
 +      if (fpi_device_get_driver_data (FP_DEVICE (self)) & FP_RTK_QUIRK_OPTIONAL_UPDATE_STATUS)
 +        {
-+          fp_warn ("Template update failed after a successful match: %s", error->message);
++          fp_dbg ("Ignoring optional template update failure after match: %s", error->message);
 +          g_error_free (error);
 +          fpi_ssm_jump_to_state (self->task_ssm, FP_RTK_VERIFY_NUM_STATES);
 +          return;
@@ -44,7 +44,7 @@ index a41b0ba..39f279f 100644
        fpi_ssm_mark_failed (self->task_ssm, error);
        return;
      }
-@@ -139,11 +155,25 @@ fp_enroll_commit_cb (FpiDeviceRealtek *self,
+@@ -139,11 +155,23 @@ fp_enroll_commit_cb (FpiDeviceRealtek *self,
    fpi_ssm_jump_to_state (self->task_ssm, FP_RTK_ENROLL_NUM_STATES);
  }
  
@@ -53,8 +53,6 @@ index a41b0ba..39f279f 100644
 +                         gpointer  user_data)
 +{
 +  FpiDeviceRealtek *self = FPI_DEVICE_REALTEK (device);
-+
-+  (void) user_data;
 +
 +  if (self->task_ssm)
 +    fpi_ssm_jump_to_state (self->task_ssm, fpi_ssm_get_cur_state (self->task_ssm));
@@ -70,7 +68,7 @@ index a41b0ba..39f279f 100644
    if (error)
      {
        fpi_ssm_mark_failed (self->task_ssm, error);
-@@ -160,6 +190,46 @@ fp_finish_capture_cb (FpiDeviceRealtek *self,
+@@ -160,6 +188,49 @@ fp_finish_capture_cb (FpiDeviceRealtek *self,
        return;
      }
  
@@ -96,6 +94,9 @@ index a41b0ba..39f279f 100644
 +      if (buffer_in[0] == 0 && capture_metric > 0)
 +        {
 +          fp_dbg ("Capture completed (metric %d)", capture_metric);
++          fpi_device_report_finger_status_changes (FP_DEVICE (self),
++                                                   FP_FINGER_STATUS_PRESENT,
++                                                   FP_FINGER_STATUS_NEEDED);
 +          fpi_ssm_next_state (self->task_ssm);
 +          return;
 +        }
@@ -117,7 +118,7 @@ index a41b0ba..39f279f 100644
    gint capture_status = buffer_in[0];
    if (capture_status == 0)
      {
-@@ -170,8 +240,12 @@ fp_finish_capture_cb (FpiDeviceRealtek *self,
+@@ -170,8 +241,12 @@ fp_finish_capture_cb (FpiDeviceRealtek *self,
      }
    else
      {
@@ -132,7 +133,7 @@ index a41b0ba..39f279f 100644
      }
  }
  
-@@ -209,6 +283,20 @@ fp_accept_sample_cb (FpiDeviceRealtek *self,
+@@ -209,6 +284,20 @@ fp_accept_sample_cb (FpiDeviceRealtek *self,
            return;
          }
  
@@ -153,7 +154,7 @@ index a41b0ba..39f279f 100644
        if (self->enroll_stage < self->max_enroll_stage)
          {
            if (in_status == FP_RTK_SUCCESS)
-@@ -260,6 +348,11 @@ fp_print_from_data (FpiDeviceRealtek *self, uint8_t *buffer)
+@@ -260,6 +349,11 @@ fp_print_from_data (FpiDeviceRealtek *self, uint8_t *buffer)
  
    userid = g_strndup ((gchar *) buffer + 1, DEFAULT_UID_LEN);
    finger = *(buffer);
@@ -165,7 +166,7 @@ index a41b0ba..39f279f 100644
  
    print = fp_print_new (FP_DEVICE (self));
    userid_len = MIN (DEFAULT_UID_LEN, strlen (userid));
-@@ -440,6 +533,7 @@ fp_get_enroll_num_cb (FpiDeviceRealtek *self,
+@@ -440,6 +534,7 @@ fp_get_enroll_num_cb (FpiDeviceRealtek *self,
      }
  
    self->template_num = buffer_in[1];
@@ -173,20 +174,41 @@ index a41b0ba..39f279f 100644
  
    fpi_ssm_next_state (self->task_ssm);
  }
-@@ -561,10 +655,10 @@ fp_list_cb (FpiDeviceRealtek *self,
+@@ -536,8 +631,6 @@ fp_list_cb (FpiDeviceRealtek *self,
+             uint8_t          *buffer_in,
+             GError           *error)
+ {
+-  gboolean found = FALSE;
+-
+   g_autoptr(GPtrArray) list_result = NULL;
  
-   if (!found)
-     {
-+      fp_info ("Device template database is empty");
-       fpi_device_list_complete (FP_DEVICE (self),
-                                 g_steal_pointer (&list_result),
--                                fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_FULL,
--                                                          "Database is empty"));
-+                                NULL);
-       return;
+   if (error)
+@@ -555,20 +648,14 @@ fp_list_cb (FpiDeviceRealtek *self,
+           FpPrint *print = NULL;
+           print = fp_print_from_data (self, buffer_in + i * self->template_len + SUBFACTOR_OFFSET);
+           g_ptr_array_add (list_result, g_object_ref_sink (print));
+-          found = TRUE;
+         }
      }
  
-@@ -602,6 +696,7 @@ parse_status (guint8 *buffer, gint status_type)
+-  if (!found)
+-    {
+-      fpi_device_list_complete (FP_DEVICE (self),
+-                                g_steal_pointer (&list_result),
+-                                fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_FULL,
+-                                                          "Database is empty"));
+-      return;
+-    }
++  if (list_result->len == 0)
++    fp_info ("Database is empty");
++  else
++    fp_info ("Query templates complete!");
+ 
+-  fp_info ("Query templates complete!");
+   fpi_device_list_complete (FP_DEVICE (self),
+                             g_steal_pointer (&list_result),
+                             NULL);
+@@ -602,6 +689,7 @@ parse_status (guint8 *buffer, gint status_type)
        break;
  
      case FP_RTK_MSG_DEFAULT:
@@ -194,7 +216,7 @@ index a41b0ba..39f279f 100644
        return buffer[0];
        break;
  
-@@ -665,9 +760,30 @@ fp_cmd_receive_cb (FpiUsbTransfer *transfer,
+@@ -665,9 +753,34 @@ fp_cmd_receive_cb (FpiUsbTransfer *transfer,
      }
  
    /* get status */
@@ -213,10 +235,14 @@ index a41b0ba..39f279f 100644
 +          status_flag = 0;
 +        }
 +      else
-+        status_flag = parse_status (transfer->buffer, self->message_type);
++        {
++          status_flag = parse_status (transfer->buffer, self->message_type);
++        }
 +    }
 +  else
-+    status_flag = parse_status (transfer->buffer, self->message_type);
++    {
++      status_flag = parse_status (transfer->buffer, self->message_type);
++    }
    if (status_flag != 0)
      {
 +      if (transfer->actual_length >= 5)
@@ -226,7 +252,7 @@ index a41b0ba..39f279f 100644
        fpi_ssm_mark_failed (transfer->ssm,
                             fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
                                                       "Status check failed"));
-@@ -967,6 +1083,40 @@ fp_delete_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
+@@ -967,6 +1080,40 @@ fp_delete_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
    self->task_ssm = NULL;
  }
  
@@ -249,7 +275,7 @@ index a41b0ba..39f279f 100644
 +}
 +
 +static void
-+rtk_prepare_capture_command (FpiDeviceRealtek *self,
++rtk_prepare_capture_command (FpiDeviceRealtek    *self,
 +                             struct rtk_cmd_bulk *cmd)
 +{
 +  if (fpi_device_get_driver_data (FP_DEVICE (self)) & FP_RTK_QUIRK_CAPTURE_PARAMS)
@@ -267,7 +293,7 @@ index a41b0ba..39f279f 100644
  static void
  fp_verify_sm_run_state (FpiSsm *ssm, FpDevice *device)
  {
-@@ -987,7 +1137,8 @@ fp_verify_sm_run_state (FpiSsm *ssm, FpDevice *device)
+@@ -987,7 +1134,8 @@ fp_verify_sm_run_state (FpiSsm *ssm, FpDevice *device)
        co_get_template.data_len[0] = GET_LEN_L (self->template_len * self->template_num);
        co_get_template.data_len[1] = GET_LEN_H (self->template_len * self->template_num);
        cmd_buf = (guint8 *) &co_get_template;
@@ -277,7 +303,7 @@ index a41b0ba..39f279f 100644
        break;
  
      case FP_RTK_VERIFY_CAPTURE:
-@@ -995,11 +1146,13 @@ fp_verify_sm_run_state (FpiSsm *ssm, FpDevice *device)
+@@ -995,11 +1143,13 @@ fp_verify_sm_run_state (FpiSsm *ssm, FpDevice *device)
                                                 FP_FINGER_STATUS_NEEDED,
                                                 FP_FINGER_STATUS_NONE);
  
@@ -291,7 +317,7 @@ index a41b0ba..39f279f 100644
        cmd_buf = (guint8 *) &co_finish_capture;
        rtk_sensor_bulk_cmd (self, cmd_buf, NULL, FP_RTK_MSG_DEFAULT, 0, fp_finish_capture_cb);
        break;
-@@ -1011,17 +1164,24 @@ fp_verify_sm_run_state (FpiSsm *ssm, FpDevice *device)
+@@ -1011,17 +1161,24 @@ fp_verify_sm_run_state (FpiSsm *ssm, FpDevice *device)
        break;
  
      case FP_RTK_VERIFY_INDENTIFY_FEATURE:
@@ -317,7 +343,7 @@ index a41b0ba..39f279f 100644
        cmd_buf = (guint8 *) &co_cancel_capture;
        rtk_sensor_bulk_cmd (self, cmd_buf, NULL, FP_RTK_MSG_DEFAULT, 0, fp_task_ssm_generic_cb);
        break;
-@@ -1056,7 +1216,8 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
+@@ -1056,7 +1213,8 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
        co_get_template.data_len[1] = GET_LEN_H (self->template_len * self->template_num);
  
        cmd_buf = (guint8 *) &co_get_template;
@@ -327,7 +353,7 @@ index a41b0ba..39f279f 100644
        break;
  
      case FP_RTK_ENROLL_BEGIN_POS:
-@@ -1070,11 +1231,13 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
+@@ -1070,11 +1228,13 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
                                                 FP_FINGER_STATUS_NEEDED,
                                                 FP_FINGER_STATUS_NONE);
  
@@ -341,7 +367,7 @@ index a41b0ba..39f279f 100644
        cmd_buf = (guint8 *) &co_finish_capture;
        rtk_sensor_bulk_cmd (self, cmd_buf, NULL, FP_RTK_MSG_DEFAULT, 0, fp_finish_capture_cb);
        break;
-@@ -1120,7 +1283,9 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
+@@ -1120,7 +1280,9 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
  
        g_debug ("user_id: %s, finger: 0x%x", user_id, finger);
  
@@ -352,7 +378,7 @@ index a41b0ba..39f279f 100644
        nor_enroll_commit.data_len[0] = GET_LEN_L (payload_len);
        nor_enroll_commit.data_len[1] = GET_LEN_H (payload_len);
  
-@@ -1131,6 +1296,8 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
+@@ -1131,6 +1293,8 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
  
      case FP_RTK_ENROLL_CANCEL_CAPTURE:
        co_cancel_capture.param[0] = self->fp_purpose;
@@ -361,7 +387,7 @@ index a41b0ba..39f279f 100644
        cmd_buf = (guint8 *) &co_cancel_capture;
        rtk_sensor_bulk_cmd (self, cmd_buf, NULL, FP_RTK_MSG_DEFAULT, 0, fp_task_ssm_generic_cb);
      }
-@@ -1182,7 +1349,8 @@ fp_delete_sm_run_state (FpiSsm *ssm, FpDevice *device)
+@@ -1182,7 +1346,8 @@ fp_delete_sm_run_state (FpiSsm *ssm, FpDevice *device)
        co_get_template.data_len[1] = GET_LEN_H (self->template_len * self->template_num);
  
        cmd_buf = (guint8 *) &co_get_template;
@@ -371,7 +397,7 @@ index a41b0ba..39f279f 100644
        break;
  
      case FP_RTK_DELETE_PRINT:
-@@ -1277,7 +1445,11 @@ dev_probe (FpDevice *device)
+@@ -1277,7 +1442,11 @@ dev_probe (FpDevice *device)
    if (product)
      fp_dbg ("Device name: %s", product);
  
@@ -384,7 +410,7 @@ index a41b0ba..39f279f 100644
    fpi_device_set_nr_enroll_stages (device, self->max_enroll_stage);
  
    g_usb_device_release_interface (fpi_device_get_usb_device (FP_DEVICE (device)), 0, 0, NULL);
-@@ -1388,7 +1560,7 @@ list_print (FpDevice *device)
+@@ -1388,7 +1557,7 @@ list_print (FpDevice *device)
    co_get_template.data_len[1] = GET_LEN_H (self->template_len * self->template_num);
  
    cmd_buf = (guint8 *) &co_get_template;
@@ -434,19 +460,648 @@ index 5658e05..0075609 100644
 -};
 \ No newline at end of file
 +};
-diff --git a/libfprint/fprint-list-udev-hwdb.c b/libfprint/fprint-list-udev-hwdb.c
-index 539f3e6..b36032a 100644
---- a/libfprint/fprint-list-udev-hwdb.c
-+++ b/libfprint/fprint-list-udev-hwdb.c
-@@ -206,6 +206,8 @@ static const FpIdEntry allowlist_id_table[] = {
- };
- 
- static const FpIdEntry denylist_id_table[] = {
-+  /* Realtek 3274:9011: avoid USB autosuspend port-reset glitches */
-+  { .vid = 0x3274, .pid = 0x9011 },
-   { .vid = 0x0483, .pid = 0x2016 },
-   /* https://bugs.freedesktop.org/show_bug.cgi?id=66659 */
-   { .vid = 0x045e, .pid = 0x00bb },
--- 
-2.56.0
+diff --git a/tests/meson.build b/tests/meson.build
+index d218e04..dfa1d37 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -59,6 +59,7 @@ drivers_tests = {
+     'fpcmoc': {},
+ 	'realtek': {},
+ 	'realtek-5816': {},
++	'realtek-9011': {},
+ 	'realtek-storage-errors': {},
+     'focaltech_moc': { 'timeout': 30 },
+     'focaltech_moc-6553': {},
+diff --git a/tests/realtek-9011/custom.pcapng b/tests/realtek-9011/custom.pcapng
+new file mode 100644
+index 0000000000000000000000000000000000000000..4acdb438e30e5618e98c78cf425e4681a1769833
+GIT binary patch
+literal 39316
+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
 
+literal 0
+HcmV?d00001
+
+diff --git a/tests/realtek-9011/custom.py b/tests/realtek-9011/custom.py
+new file mode 100755
+index 0000000..cefcec6
+--- /dev/null
++++ b/tests/realtek-9011/custom.py
+@@ -0,0 +1,110 @@
++#!/usr/bin/env python3
++
++import sys
++import traceback
++import gi
++
++gi.require_version('FPrint', '2.0')
++from gi.repository import FPrint, GLib
++
++# Exit with error on any exception, included those happening in async callbacks
++sys.excepthook = lambda *args: (traceback.print_exception(*args), sys.exit(1))
++
++ctx = GLib.main_context_default()
++
++c = FPrint.Context()
++c.enumerate()
++devices = c.get_devices()
++
++d = devices[0]
++del devices
++
++assert d.get_driver() == "realtek"
++assert d.get_nr_enroll_stages() == 12
++assert not d.has_feature(FPrint.DeviceFeature.CAPTURE)
++assert d.has_feature(FPrint.DeviceFeature.IDENTIFY)
++assert d.has_feature(FPrint.DeviceFeature.VERIFY)
++assert not d.has_feature(FPrint.DeviceFeature.DUPLICATES_CHECK)
++assert d.has_feature(FPrint.DeviceFeature.STORAGE)
++assert d.has_feature(FPrint.DeviceFeature.STORAGE_LIST)
++assert d.has_feature(FPrint.DeviceFeature.STORAGE_DELETE)
++assert d.has_feature(FPrint.DeviceFeature.STORAGE_CLEAR)
++
++d.open_sync()
++
++d.clear_storage_sync()
++
++# Listing an empty template table must return an empty list without error,
++# even when GET_TEMPLATE (0x45 0x0e) reports a non-zero status byte.
++empty_stored = d.list_prints_sync()
++assert len(empty_stored) == 0
++del empty_stored
++
++stages_seen = []
++
++
++def enroll_progress(device, completed_stages, print_obj, user_data, error):
++    assert error is None
++    assert device.get_finger_status() == FPrint.FingerStatusFlags.NONE
++    stages_seen.append(completed_stages)
++    print(f"enroll progress: {completed_stages}/{device.get_nr_enroll_stages()}")
++
++
++identified = False
++
++
++def identify_done(dev, res):
++    global identified
++    identified = True
++    identify_match, identify_print = dev.identify_finish(res)
++    assert identify_match is not None
++    assert identify_print is not None
++    assert identify_match.equal(identify_print)
++
++
++template = FPrint.Print.new(d)
++
++print("enrolling")
++assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
++p = d.enroll_sync(template, None, enroll_progress, None)
++assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
++assert stages_seen == list(range(1, 13))
++print("enroll done")
++
++print("listing")
++stored = d.list_prints_sync()
++assert len(stored) == 1
++assert stored[0].equal(p)
++print("listing done")
++
++print("verifying")
++assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
++verify_res, verify_print = d.verify_sync(p)
++assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
++assert verify_res is True
++assert verify_print.equal(p)
++del verify_print
++print("verify done")
++
++deserialized_prints = []
++for s in stored:
++    deserialized_prints.append(FPrint.Print.deserialize(s.serialize()))
++    assert deserialized_prints[-1].equal(s)
++del stored
++
++print("async identifying")
++d.identify(deserialized_prints, callback=identify_done)
++del deserialized_prints
++
++while not identified:
++    ctx.iteration(True)
++
++print("deleting")
++d.delete_print_sync(p)
++del p
++print("delete done")
++
++d.close_sync()
++
++del d
++del c
+diff --git a/tests/realtek-9011/device b/tests/realtek-9011/device
+new file mode 100644
+index 0000000..24a8d03
+--- /dev/null
++++ b/tests/realtek-9011/device
+@@ -0,0 +1,333 @@
++P: /devices/pci0000:00/0000:00:08.1/0000:c5:00.4/usb1/1-1
++N: bus/usb/001/002=12010102EF0201407432119002000301020109022E00010104A0FA0904000004FF02000507050102000200070583031000080705840310000807058202000200
++E: BUSNUM=001
++E: DEVNAME=/dev/bus/usb/001/002
++E: DEVNUM=002
++E: DEVTYPE=usb_device
++E: DRIVER=usb
++E: ID_AUTOSUSPEND=1
++E: ID_BUS=usb
++E: ID_MODEL=Realtek_USB2.0_Finger_Print_Bridge
++E: ID_MODEL_ENC=Realtek\x20USB2.0\x20Finger\x20Print\x20Bridge
++E: ID_MODEL_ID=9011
++E: ID_PATH=pci-0000:c5:00.4-usb-0:1
++E: ID_PATH_TAG=pci-0000_c5_00_4-usb-0_1
++E: ID_PATH_WITH_USB_REVISION=pci-0000:c5:00.4-usbv2-0:1
++E: ID_PERSIST=0
++E: ID_REVISION=0002
++E: ID_SERIAL=Generic_Realtek_USB2.0_Finger_Print_Bridge_201801010001
++E: ID_SERIAL_SHORT=201801010001
++E: ID_USB_INTERFACES=:ff0200:
++E: ID_USB_MODEL=Realtek_USB2.0_Finger_Print_Bridge
++E: ID_USB_MODEL_ENC=Realtek\x20USB2.0\x20Finger\x20Print\x20Bridge
++E: ID_USB_MODEL_ID=9011
++E: ID_USB_REVISION=0002
++E: ID_USB_SERIAL=Generic_Realtek_USB2.0_Finger_Print_Bridge_201801010001
++E: ID_USB_SERIAL_SHORT=201801010001
++E: ID_USB_VENDOR=Generic
++E: ID_USB_VENDOR_ENC=Generic
++E: ID_USB_VENDOR_ID=3274
++E: ID_VENDOR=Generic
++E: ID_VENDOR_ENC=Generic
++E: ID_VENDOR_ID=3274
++E: MAJOR=189
++E: MINOR=1
++E: NVME_HOST_IFACE=none
++E: PRODUCT=3274/9011/2
++E: SUBSYSTEM=usb
++E: TYPE=239/2/1
++E: __DEVCONTEXT=system_u:object_r:usb_device_t:s0
++A: authorized=1\n
++A: avoid_reset_quirk=0\n
++A: bConfigurationValue=1\n
++A: bDeviceClass=ef\n
++A: bDeviceProtocol=01\n
++A: bDeviceSubClass=02\n
++A: bMaxPacketSize0=64\n
++A: bMaxPower=500mA\n
++A: bNumConfigurations=1\n
++A: bNumInterfaces= 1\n
++A: bcdDevice=0002\n
++A: bmAttributes=a0\n
++H: bos_descriptors=050F2900021C100500DF60DDD88945C74C9CD2659D9E648A9F000003069C0115000810110103000000
++A: busnum=1\n
++A: configuration=Realtek USB2.0 Finger Print Bridge\n
++H: descriptors=12010102EF0201407432119002000301020109022E00010104A0FA0904000004FF02000507050102000200070583031000080705840310000807058202000200
++A: dev=189:1\n
++A: devnum=2\n
++A: devpath=1\n
++L: driver=../../../../../../bus/usb/drivers/usb
++L: firmware_node=../../../../../LNXSYSTM:00/LNXSYBUS:00/PNP0A08:00/device:17/device:1c/device:1d/device:1e
++A: idProduct=9011\n
++A: idVendor=3274\n
++A: ltm_capable=no\n
++A: manufacturer=Generic\n
++A: maxchild=0\n
++A: physical_location/dock=no\n
++A: physical_location/horizontal_position=center\n
++A: physical_location/lid=no\n
++A: physical_location/panel=left\n
++A: physical_location/vertical_position=center\n
++L: port=../1-0:1.0/usb1-port1
++A: power/active_duration=518410\n
++A: power/autosuspend=2\n
++A: power/autosuspend_delay_ms=2000\n
++A: power/connected_duration=20466012\n
++A: power/control=auto\n
++A: power/level=auto\n
++A: power/persist=1\n
++A: power/runtime_active_time=520324\n
++A: power/runtime_status=active\n
++A: power/runtime_suspended_time=19945452\n
++A: power/wakeup=disabled\n
++A: power/wakeup_abort_count=\n
++A: power/wakeup_active=\n
++A: power/wakeup_active_count=\n
++A: power/wakeup_count=\n
++A: power/wakeup_expire_count=\n
++A: power/wakeup_last_time_ms=\n
++A: power/wakeup_max_time_ms=\n
++A: power/wakeup_total_time_ms=\n
++A: product=Realtek USB2.0 Finger Print Bridge\n
++A: quirks=0x0\n
++A: removable=removable\n
++A: rx_lanes=1\n
++A: serial=201801010001\n
++A: speed=480\n
++A: tx_lanes=1\n
++A: urbnum=8124388\n
++A: version= 2.01\n
++
++P: /devices/pci0000:00/0000:00:08.1/0000:c5:00.4/usb1
++N: bus/usb/001/001=12010002090001406B1D020001070302010109021900010100E0000904000001090000000705810304000C
++E: BUSNUM=001
++E: CURRENT_TAGS=:seat:
++E: DEVNAME=/dev/bus/usb/001/001
++E: DEVNUM=001
++E: DEVTYPE=usb_device
++E: DRIVER=usb
++E: ID_AUTOSUSPEND=1
++E: ID_BUS=usb
++E: ID_FOR_SEAT=usb-pci-0000_c5_00_4
++E: ID_MODEL=xHCI_Host_Controller
++E: ID_MODEL_ENC=xHCI\x20Host\x20Controller
++E: ID_MODEL_FROM_DATABASE=2.0 root hub
++E: ID_MODEL_ID=0002
++E: ID_PATH=pci-0000:c5:00.4
++E: ID_PATH_TAG=pci-0000_c5_00_4
++E: ID_REVISION=0701
++E: ID_SERIAL=Linux_7.1.10-200.fc44.x86_64_xhci-hcd_xHCI_Host_Controller_0000:c5:00.4
++E: ID_SERIAL_SHORT=0000:c5:00.4
++E: ID_USB_INTERFACES=:090000:
++E: ID_USB_MODEL=xHCI_Host_Controller
++E: ID_USB_MODEL_ENC=xHCI\x20Host\x20Controller
++E: ID_USB_MODEL_ID=0002
++E: ID_USB_REVISION=0701
++E: ID_USB_SERIAL=Linux_7.1.10-200.fc44.x86_64_xhci-hcd_xHCI_Host_Controller_0000:c5:00.4
++E: ID_USB_SERIAL_SHORT=0000:c5:00.4
++E: ID_USB_VENDOR=Linux_7.1.10-200.fc44.x86_64_xhci-hcd
++E: ID_USB_VENDOR_ENC=Linux\x207.1.10-200.fc44.x86_64\x20xhci-hcd
++E: ID_USB_VENDOR_ID=1d6b
++E: ID_VENDOR=Linux_7.1.10-200.fc44.x86_64_xhci-hcd
++E: ID_VENDOR_ENC=Linux\x207.1.10-200.fc44.x86_64\x20xhci-hcd
++E: ID_VENDOR_FROM_DATABASE=Linux Foundation
++E: ID_VENDOR_ID=1d6b
++E: MAJOR=189
++E: MINOR=0
++E: PRODUCT=1d6b/2/701
++E: SUBSYSTEM=usb
++E: TAGS=:seat:
++E: TYPE=9/0/1
++E: __DEVCONTEXT=system_u:object_r:usb_device_t:s0
++A: authorized=1\n
++A: authorized_default=1\n
++A: avoid_reset_quirk=0\n
++A: bConfigurationValue=1\n
++A: bDeviceClass=09\n
++A: bDeviceProtocol=01\n
++A: bDeviceSubClass=00\n
++A: bMaxPacketSize0=64\n
++A: bMaxPower=0mA\n
++A: bNumConfigurations=1\n
++A: bNumInterfaces= 1\n
++A: bcdDevice=0701\n
++A: bmAttributes=e0\n
++A: busnum=1\n
++A: configuration=
++H: descriptors=12010002090001406B1D020001070302010109021900010100E0000904000001090000000705810304000C
++A: dev=189:0\n
++A: devnum=1\n
++A: devpath=0\n
++L: driver=../../../../../bus/usb/drivers/usb
++L: firmware_node=../../../../LNXSYSTM:00/LNXSYBUS:00/PNP0A08:00/device:17/device:1c/device:1d
++A: idProduct=0002\n
++A: idVendor=1d6b\n
++A: interface_authorized_default=1\n
++A: ltm_capable=no\n
++A: manufacturer=Linux 7.1.10-200.fc44.x86_64 xhci-hcd\n
++A: maxchild=1\n
++A: power/active_duration=520698\n
++A: power/autosuspend=0\n
++A: power/autosuspend_delay_ms=0\n
++A: power/connected_duration=20466146\n
++A: power/control=auto\n
++A: power/level=auto\n
++A: power/runtime_active_time=520694\n
++A: power/runtime_status=active\n
++A: power/runtime_suspended_time=19945450\n
++A: power/wakeup=disabled\n
++A: power/wakeup_abort_count=\n
++A: power/wakeup_active=\n
++A: power/wakeup_active_count=\n
++A: power/wakeup_count=\n
++A: power/wakeup_expire_count=\n
++A: power/wakeup_last_time_ms=\n
++A: power/wakeup_max_time_ms=\n
++A: power/wakeup_total_time_ms=\n
++A: product=xHCI Host Controller\n
++A: quirks=0x0\n
++A: removable=unknown\n
++A: rx_lanes=1\n
++A: serial=0000:c5:00.4\n
++A: speed=480\n
++A: tx_lanes=1\n
++A: urbnum=617\n
++A: version= 2.00\n
++
++P: /devices/pci0000:00/0000:00:08.1/0000:c5:00.4
++E: DRIVER=xhci_hcd
++E: ID_PATH=pci-0000:c5:00.4
++E: ID_PATH_TAG=pci-0000_c5_00_4
++E: ID_PCI_CLASS_FROM_DATABASE=Serial bus controller
++E: ID_PCI_INTERFACE_FROM_DATABASE=XHCI
++E: ID_PCI_SUBCLASS_FROM_DATABASE=USB controller
++E: ID_VENDOR_FROM_DATABASE=Advanced Micro Devices, Inc. [AMD]
++E: MODALIAS=pci:v00001022d0000151Esv00001F4Csd0000B020bc0Csc03i30
++E: PCI_CLASS=C0330
++E: PCI_ID=1022:151E
++E: PCI_SLOT_NAME=0000:c5:00.4
++E: PCI_SUBSYS_ID=1F4C:B020
++E: SUBSYSTEM=pci
++A: ari_enabled=0\n
++A: broken_parity_status=0\n
++A: class=0x0c0330\n
++H: config=22101E15070410000030030C10008000040030DC0000000000000000000000000000000000000000000000004C1F20B0000000004800000000000000FF0400000000000000000000095008004C1F20B0016403C80000000000000000000000003160000010A00200A18F000030290000040D400040000411000000000000000000000000000000001F007100000000001E00800100000100000000000000000005C08000000000000000000000000000000000000000000000000000000000001100008000E00F0000F00F00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000B00012A010001010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000D000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++A: consistent_dma_mask_bits=64\n
++A: current_link_speed=16.0 GT/s PCIe\n
++A: current_link_width=16\n
++A: d3cold_allowed=1\n
++A: dbc=disabled\n
++A: dbc_bInterfaceProtocol=01\n
++A: dbc_bcdDevice=0010\n
++A: dbc_idProduct=0010\n
++A: dbc_idVendor=1d6b\n
++A: dbc_manufacturer=Linux Foundation\n
++A: dbc_poll_interval_ms=64\n
++A: dbc_product=Linux USB Debug Target\n
++A: dbc_serial=0001\n
++A: device=0x151e\n
++A: dma_mask_bits=64\n
++L: driver=../../../../bus/pci/drivers/xhci_hcd
++A: driver_override=(null)\n
++A: enable=1\n
++L: firmware_node=../../../LNXSYSTM:00/LNXSYBUS:00/PNP0A08:00/device:17/device:1c
++L: iommu=../../0000:00:00.2/iommu/ivhd0
++L: iommu_group=../../../../kernel/iommu_groups/23
++A: irq=42\n
++A: link/l0s_aspm=0\n
++A: link/l1_aspm=0\n
++A: local_cpulist=0-23\n
++A: local_cpus=ffffff\n
++A: max_link_speed=16.0 GT/s PCIe\n
++A: max_link_width=16\n
++A: modalias=pci:v00001022d0000151Esv00001F4Csd0000B020bc0Csc03i30\n
++A: msi_bus=1\n
++A: msi_irqs/43=msix\n
++A: numa_node=-1\n
++A: pools=poolinfo - 0.1\nbuffer-2048         0    0 2048  0\nbuffer-512          0    0  512  0\nbuffer-128          0    0  128  0\nbuffer-32           0    0   32  0\nxHCI 256 port bw ctx arrays    0    0  256  0\nxHCI 1KB stream ctx arrays    0    0 1024  0\nxHCI 256 byte stream ctx arrays    0    0  256  0\nxHCI input/output contexts    2    3 2112  3\nxHCI ring segments   13   13 4096 13\nbuffer-2048         0    0 2048  0\nbuffer-512          0    0  512  0\nbuffer-128          0    0  128  0\nbuffer-32           0    0   32  0\n
++A: power/control=auto\n
++A: power/runtime_active_time=522619\n
++A: power/runtime_status=active\n
++A: power/runtime_suspended_time=19944850\n
++A: power/wakeup=enabled\n
++A: power/wakeup_abort_count=0\n
++A: power/wakeup_active=0\n
++A: power/wakeup_active_count=0\n
++A: power/wakeup_count=0\n
++A: power/wakeup_expire_count=0\n
++A: power/wakeup_last_time_ms=0\n
++A: power/wakeup_max_time_ms=0\n
++A: power/wakeup_total_time_ms=0\n
++A: power_state=D0\n
++A: reset_method=pm\n
++A: resource=0x00000000dc300000 0x00000000dc3fffff 0x0000000000140204\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n
++A: revision=0x00\n
++A: subsystem_device=0xb020\n
++A: subsystem_vendor=0x1f4c\n
++L: supplier:pci:0000:c5:00.0=../../../virtual/devlink/pci:0000:c5:00.0--pci:0000:c5:00.4
++A: vendor=0x1022\n
++
++P: /devices/pci0000:00/0000:00:08.1
++E: DRIVER=pcieport
++E: ID_MODEL_FROM_DATABASE=Strix/Strix Halo Internal GPP Bridge to Bus [C:A]
++E: ID_PATH=pci-0000:00:08.1
++E: ID_PATH_TAG=pci-0000_00_08_1
++E: ID_PCI_CLASS_FROM_DATABASE=Bridge
++E: ID_PCI_INTERFACE_FROM_DATABASE=Normal decode
++E: ID_PCI_SUBCLASS_FROM_DATABASE=PCI bridge
++E: ID_VENDOR_FROM_DATABASE=Advanced Micro Devices, Inc. [AMD]
++E: MODALIAS=pci:v00001022d0000150Csv00001F4Csd0000B020bc06sc04i00
++E: PCI_CLASS=60400
++E: PCI_ID=1022:150C
++E: PCI_SLOT_NAME=0000:00:08.1
++E: PCI_SUBSYS_ID=1F4C:B020
++E: SUBSYSTEM=pci
++A: ari_enabled=0\n
++A: broken_parity_status=0\n
++A: class=0x060400\n
++H: config=22100C15070410000000040610008100000000000000000000C5C500D1D1000000DC50DC0100F10F8800000088000000000000005000000000000000FF011E0000000000000000000000000000000000015803C80000000010A042002280000030290000040D7000400C043100000000000040001800010006C5000040003100000000001E00800144001F00000000000000000000000000000000000000000005C081000000E0FE0000000000000000000000000000000000000000000000000D0000004C1F20B000000000000000000000000000000000000000000000000000000000FC27FFFF0000000000000000000000000000000000000000000000000B000127010001010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001900012A00000000000000007F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F000000000D0001405F001D000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000250001410100008001000080000000002600014500000000000000000F00000000000000000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000000000000000000000000000000002700010000000000389C0000389C0000389C0000389C0000389C0000389C0000389C0000389C0000389C0000389C0000389C0000389C0000389C0000389C0000389C0000389C000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++A: consistent_dma_mask_bits=32\n
++A: current_link_speed=16.0 GT/s PCIe\n
++A: current_link_width=16\n
++A: d3cold_allowed=1\n
++A: device=0x150c\n
++A: dma_mask_bits=32\n
++L: driver=../../../bus/pci/drivers/pcieport
++A: driver_override=(null)\n
++A: enable=2\n
++L: firmware_node=../../LNXSYSTM:00/LNXSYBUS:00/PNP0A08:00/device:17
++L: iommu=../0000:00:00.2/iommu/ivhd0
++L: iommu_group=../../../kernel/iommu_groups/11
++A: irq=39\n
++A: local_cpulist=0-23\n
++A: local_cpus=ffffff\n
++A: max_link_speed=16.0 GT/s PCIe\n
++A: max_link_width=16\n
++A: modalias=pci:v00001022d0000150Csv00001F4Csd0000B020bc06sc04i00\n
++A: msi_bus=1\n
++A: msi_irqs/39=msi\n
++A: numa_node=-1\n
++A: power/autosuspend_delay_ms=100\n
++A: power/control=auto\n
++A: power/runtime_active_time=20467475\n
++A: power/runtime_status=active\n
++A: power/runtime_suspended_time=0\n
++A: power/wakeup=disabled\n
++A: power/wakeup_abort_count=\n
++A: power/wakeup_active=\n
++A: power/wakeup_active_count=\n
++A: power/wakeup_count=\n
++A: power/wakeup_expire_count=\n
++A: power/wakeup_last_time_ms=\n
++A: power/wakeup_max_time_ms=\n
++A: power/wakeup_total_time_ms=\n
++A: power_state=D0\n
++A: reset_method=pm\n
++A: resource=0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n0x000000000000d000 0x000000000000dfff 0x0000000000000101\n0x00000000dc000000 0x00000000dc5fffff 0x0000000000000200\n0x0000008800000000 0x000000880fffffff 0x0000000000102201\n0x0000000000000000 0x0000000000000000 0x0000000000000000\n
++A: revision=0x00\n
++A: secondary_bus_number=197\n
++A: subordinate_bus_number=197\n
++A: subsystem_device=0xb020\n
++A: subsystem_vendor=0x1f4c\n
++A: vendor=0x1022\n
++

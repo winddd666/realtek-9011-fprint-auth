@@ -79,7 +79,7 @@ fprintd-enroll "$USER"
 fprintd-verify "$USER"
 ```
 
-> **Note**: Each enrollment stage advances after a full **press and release**. `3274:9011` is automatically excluded from `udev-hwdb` USB autosuspend by this package to prevent port-reset glitches on wake.
+> **Note**: Each enrollment stage advances after a full **press and release**. `3274:9011` is registered in `data/autosuspend.hwdb` (`ID_AUTOSUSPEND=1`), allowing the sensor to enter low-power USB runtime suspend after 2 seconds of inactivity and wake automatically on `fprintd` requests.
 
 ---
 
